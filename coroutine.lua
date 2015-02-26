@@ -1,3 +1,5 @@
+-- $Id: coroutine.lua,v 1.37 2014/12/26 17:20:53 roberto Exp $
+
 print "testing coroutines"
 
 local debug = require'debug'
@@ -7,8 +9,13 @@ local f
 local main, ismain = coroutine.running()
 assert(type(main) == "thread" and ismain)
 assert(not coroutine.resume(main))
+assert(not coroutine.isyieldable())
 assert(not pcall(coroutine.yield))
 
+
+-- trivial errors
+assert(not pcall(coroutine.resume, 0))
+assert(not pcall(coroutine.status, 0))
 
 
 -- tests for multiple yield/resume arguments
@@ -25,8 +32,12 @@ _G.x = nil   -- declare x
 function foo (a, ...)
   local x, y = coroutine.running()
   assert(x == f and y == false)
+  -- next call should not corrupt coroutine (but must fail,
+  -- as it attempts to resume the running coroutine)
+  assert(coroutine.resume(f) == false)
   assert(coroutine.status(f) == "running")
   local arg = {...}
+  assert(coroutine.isyieldable())
   for i=1,#arg do
     _G.x = {coroutine.yield(table.unpack(arg[i]))}
   end
@@ -105,12 +116,13 @@ while 1 do
 end
 
 assert(#a == 25 and a[#a] == 97)
-
+x, a = nil
 
 -- yielding across C boundaries
 
 co = coroutine.wrap(function()
        assert(not pcall(table.sort,{1,2,3}, coroutine.yield))
+       assert(coroutine.isyieldable())
        coroutine.yield(20)
        return 30
      end)
@@ -146,6 +158,22 @@ co = coroutine.wrap(function ()
 assert(co() == 10)
 r, msg = co(100)
 assert(not r and msg == 240)
+
+
+-- unyieldable C call
+do
+  local function f (c)
+          assert(not coroutine.isyieldable())
+          return c .. c
+        end
+
+  local co = coroutine.wrap(function (c)
+               assert(coroutine.isyieldable())
+               local s = string.gsub("a", ".", f)
+               return s
+             end)
+  assert(co() == "aa")
+end
 
 
 -- errors in coroutines
@@ -215,18 +243,25 @@ assert(f() == 43 and f() == 53)
 function co_func (current_co)
   assert(coroutine.running() == current_co)
   assert(coroutine.resume(current_co) == false)
+  coroutine.yield(10, 20)
   assert(coroutine.resume(current_co) == false)
+  coroutine.yield(23)
   return 10
 end
 
 local co = coroutine.create(co_func)
-local a,b = coroutine.resume(co, co)
+local a,b,c = coroutine.resume(co, co)
+assert(a == true and b == 10 and c == 20)
+a,b = coroutine.resume(co, co)
+assert(a == true and b == 23)
+a,b = coroutine.resume(co, co)
 assert(a == true and b == 10)
 assert(coroutine.resume(co, co) == false)
 assert(coroutine.resume(co, co) == false)
 
 
 -- attempt to resume 'normal' coroutine
+local co1, co2
 co1 = coroutine.create(function () return co2() end)
 co2 = coroutine.wrap(function ()
         assert(coroutine.status(co1) == 'normal')
@@ -241,6 +276,7 @@ assert(coroutine.status(co1) == 'dead')
 -- infinite recursion of coroutines
 a = function(a) coroutine.wrap(a)(a) end
 assert(not pcall(a, a))
+a = nil
 
 
 -- access to locals of erroneous coroutines
@@ -258,7 +294,7 @@ assert(_G.f() == 12)
 
 
 if not T then
-  (Message or print)('\a\n >>> testC not active: skipping yield/hook tests <<<\n\a')
+  (Message or print)('\n >>> testC not active: skipping yield/hook tests <<<\n')
 else
   print "testing yields inside hooks"
 
@@ -271,24 +307,24 @@ else
     end
   end
 
-  local A,B,a,b = 0,0,0,0
+  local A, B = 0, 0
 
   local x = coroutine.create(function ()
     T.sethook("yield 0", "", 2)
-    A = fact("A", 10)
+    A = fact("A", 6)
   end)
 
   local y = coroutine.create(function ()
     T.sethook("yield 0", "", 3)
-    B = fact("B", 11)
+    B = fact("B", 7)
   end)
 
-  while A==0 or B==0 do
+  while A==0 or B==0 do    -- A ~= 0 when 'x' finishes (similar for 'B','y')
     if A==0 then turn = "A"; assert(T.resume(x)) end
     if B==0 then turn = "B"; assert(T.resume(y)) end
   end
 
-  assert(B/A == 11)
+  assert(B // A == 7)    -- fact(7) // fact(6)
 
   local line = debug.getinfo(1, "l").currentline + 2    -- get line number
   local function foo ()
@@ -441,6 +477,7 @@ if not _soft then
     local r, msg = coroutine.resume(co)
     assert(not r)
   end
+  co = nil
 end
 
 
@@ -457,6 +494,20 @@ local mt = {
   __le = function(a,b) coroutine.yield(nil, "le"); return a - b <= 0 end,
   __add = function(a,b) coroutine.yield(nil, "add"); return a.x + b.x end,
   __sub = function(a,b) coroutine.yield(nil, "sub"); return a.x - b.x end,
+  __mod = function(a,b) coroutine.yield(nil, "mod"); return a.x % b.x end,
+  __unm = function(a,b) coroutine.yield(nil, "unm"); return -a.x end,
+  __bnot = function(a,b) coroutine.yield(nil, "bnot"); return ~a.x end,
+  __shl = function(a,b) coroutine.yield(nil, "shl"); return a.x << b.x end,
+  __shr = function(a,b) coroutine.yield(nil, "shr"); return a.x >> b.x end,
+  __band = function(a,b)
+             a = type(a) == "table" and a.x or a
+             b = type(b) == "table" and b.x or b
+             coroutine.yield(nil, "band")
+             return a & b
+           end,
+  __bor = function(a,b) coroutine.yield(nil, "bor"); return a.x | b.x end,
+  __bxor = function(a,b) coroutine.yield(nil, "bxor"); return a.x ~ b.x end,
+
   __concat = function(a,b)
                coroutine.yield(nil, "concat");
                a = type(a) == "table" and a.x or a
@@ -497,6 +548,16 @@ assert(run(function () if (a<=b) then return '<=' else return '>' end end,
        {"lt"}) == "<=")
 assert(run(function () if (a==b) then return '==' else return '~=' end end,
        {"eq"}) == "~=")
+
+assert(run(function () return a & b + a end, {"add", "band"}) == 2)
+
+assert(run(function () return a % b end, {"mod"}) == 10)
+
+assert(run(function () return ~a & b end, {"bnot", "band"}) == ~10 & 12)
+assert(run(function () return a | b end, {"bor"}) == 10 | 12)
+assert(run(function () return a ~ b end, {"bxor"}) == 10 ~ 12)
+assert(run(function () return a << b end, {"shl"}) == 10 << 12)
+assert(run(function () return a >> b end, {"shr"}) == 10 >> 12)
 
 assert(run(function () return a..b end, {"concat"}) == "1012")
 
@@ -539,7 +600,7 @@ assert(run(function ()
 
 -- tests for coroutine API
 if T==nil then
-  (Message or print)('\a\n >>> testC not active: skipping coroutine API tests <<<\n\a')
+  (Message or print)('\n >>> testC not active: skipping coroutine API tests <<<\n')
   return
 end
 
@@ -558,21 +619,21 @@ local a = {apico(
   pcallk 1 0 2;
   invalid command (should not arrive here)
 ]],
-[[getctx; gettop; return .]],
+[[gettop; return .]],
 "stackmark",
 error
 )()}
-assert(#a == 6 and
+assert(#a == 4 and
        a[3] == "stackmark" and
        a[4] == "errorcode" and
-       a[5] == "ERRRUN" and
-       a[6] == 2)       -- 'ctx' to pcallk
+       _G.status == "ERRRUN" and
+       _G.ctx == 2)       -- 'ctx' to pcallk
 
 local co = apico(
   "pushvalue 2; pushnum 10; pcallk 1 2 3; invalid command;",
   coroutine.yield,
-  "getctx; pushvalue 2; pushstring a; pcallk 1 0 4; invalid command",
-  "getctx; gettop; return .")
+  "getglobal status; getglobal ctx; pushvalue 2; pushstring a; pcallk 1 0 4; invalid command",
+  "getglobal status; getglobal ctx; gettop; return .")
 
 assert(co() == 10)
 assert(co(20, 30) == 'a')
@@ -598,17 +659,18 @@ assert(co(23,16) == 10)
 f = T.makeCfunc([[
         pushnum 102
 	yieldk	1 U2
-	return 2
+	cannot be here!
 ]],
-[[
-	pushnum 23   # continuation
+[[      # continuation
+	pushvalue U3   # accessing upvalues inside a continuation
+        pushvalue U4
 	gettop
 	return .
-]])
+]], 23, "huu")
 
 x = coroutine.wrap(f)
 assert(x() == 102)
-assert(x() == 23)
+eqtab({x()}, {23, "huu"})
 
 
 f = T.makeCfunc[[pushstring 'a'; pushnum 102; yield 2; ]]
@@ -657,40 +719,42 @@ assert(#a == 3 and a[1] == a[2] and a[2] == a[3] and a[3] == 34)
 -- testing yields with continuations
 
 co = coroutine.wrap(function (...) return
-       T.testC([[
-          getctx
-          yieldk 3 2
-          nonexec error
+       T.testC([[ # initial function
+          yieldk 1 2
+          cannot be here!
        ]],
-       [[  # continuation
-         getctx
-         yieldk 2 3 
+       [[  # 1st continuation
+         yieldk 0 3 
+         cannot be here!
        ]],
-       [[  # continuation
-         getctx
-         yieldk 2 4 
+       [[  # 2nd continuation
+         yieldk 0 4 
+         cannot be here!
        ]],
-       [[  # continuation
-          pushvalue 6; pushnum 10; pushnum 20;
-          pcall 2 0     # call should throw an error and execution continues
+       [[  # 3th continuation
+          pushvalue 6   # function which is last arg. to 'testC' here
+          pushnum 10; pushnum 20;
+          pcall 2 0 0   # call should throw an error and return to next line
           pop 1		# remove error message
           pushvalue 6
-          getctx
+          getglobal status; getglobal ctx
           pcallk 2 2 5  # call should throw an error and jump to continuation
           cannot be here!
        ]],
-       [[  # continuation
+       [[  # 4th (and last) continuation
          gettop
          return .
        ]],
-       function (a,b)  x=a; y=b; error("errmsg") end,
+       -- function called by 3th continuation
+       function (a,b) x=a; y=b; error("errmsg") end,
        ...
 )
 end)
 
-local a = {co(3,4,6)}; assert(a[1] == 6 and a[2] == "OK" and a[3] == 0)
-a = {co()}; assert(a[1] == "YIELD" and a[2] == 2)
-a = {co()}; assert(a[1] == "YIELD" and a[2] == 3)
+local a = {co(3,4,6)}
+assert(a[1] == 6 and a[2] == nil)
+a = {co()}; assert(a[1] == nil and _G.status == "YIELD" and _G.ctx == 2)
+a = {co()}; assert(a[1] == nil and _G.status == "YIELD" and _G.ctx == 3)
 a = {co(7,8)};
 -- original arguments
 assert(type(a[1]) == 'string' and type(a[2]) == 'string' and
@@ -707,13 +771,6 @@ assert(x == "YIELD" and y == 4)
 
 assert(not pcall(co))   -- coroutine should be dead
 
--- testing ctx
-
-a,b = T.testC(
-       [[ pushstring print; pcallk 0 0 12    # error
-          getctx; return 2 ]])
-assert(a == "OK" and b == 0)   -- no ctx outside continuations
-
 
 -- bug in nCcalls
 local co = coroutine.wrap(function ()
@@ -723,6 +780,5 @@ end)
 
 local a = {co()}
 assert(a[10] == "hi")
-
 
 print'OK'

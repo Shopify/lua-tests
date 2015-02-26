@@ -1,11 +1,22 @@
+-- $Id: sort.lua,v 1.30 2014/12/26 17:20:53 roberto Exp $
+
 print "testing (parts of) table library"
 
 print "testing unpack"
 
 local unpack = table.unpack
 
+
+local function checkerror (msg, f, ...)
+  local s, err = pcall(f, ...)
+  assert(not s and string.find(err, msg))
+end
+
+
+checkerror("wrong number of arguments", table.insert, {}, 2, 3, 4)
+
 local x,y,z,a,n
-a = {}; lim = 2000
+a = {}; lim = _soft and 200 or 2000
 for i=1, lim do a[i]=i end
 assert(select(lim, unpack(a)) == lim and select('#', unpack(a)) == lim)
 x = unpack(a)
@@ -27,18 +38,40 @@ assert(a==1 and x==nil)
 a,x = unpack({1,2}, 1, 1)
 assert(a==1 and x==nil)
 
-if not _no32 then
-  assert(not pcall(unpack, {}, 0, 2^31-1))
-  assert(not pcall(unpack, {}, 1, 2^31-1))
-  assert(not pcall(unpack, {}, -(2^31), 2^31-1))
-  assert(not pcall(unpack, {}, -(2^31 - 1), 2^31-1))
-  assert(pcall(unpack, {}, 2^31-1, 0))
-  assert(pcall(unpack, {}, 2^31-1, 1))
-  pcall(unpack, {}, 1, 2^31)
-  a, b = unpack({[2^31-1] = 20}, 2^31-1, 2^31-1)
+do
+  local maxI = math.maxinteger
+  local minI = math.mininteger
+  local maxi = (1 << 31) - 1          -- maximum value for an int (usually)
+  local mini = -(1 << 31)             -- minimum value for an int (usually)
+  checkerror("too many results", unpack, {}, 0, maxi)
+  checkerror("too many results", unpack, {}, 1, maxi)
+  checkerror("too many results", unpack, {}, 0, maxI)
+  checkerror("too many results", unpack, {}, 1, maxI)
+  checkerror("too many results", unpack, {}, mini, maxi)
+  checkerror("too many results", unpack, {}, -maxi, maxi)
+  checkerror("too many results", unpack, {}, minI, maxI)
+  unpack({}, maxi, 0)
+  unpack({}, maxi, 1)
+  unpack({}, maxI, minI)
+  pcall(unpack, {}, 1, maxi + 1)
+  local a, b = unpack({[maxi] = 20}, maxi, maxi)
   assert(a == 20 and b == nil)
-  a, b = unpack({[2^31-1] = 20}, 2^31-2, 2^31-1)
+  a, b = unpack({[maxi] = 20}, maxi - 1, maxi)
   assert(a == nil and b == 20)
+  local t = {[maxI - 1] = 12, [maxI] = 23}
+  a, b = unpack(t, maxI - 1, maxI); assert(a == 12 and b == 23)
+  a, b = unpack(t, maxI, maxI); assert(a == 23 and b == nil)
+  a, b = unpack(t, maxI, maxI - 1); assert(a == nil and b == nil)
+  t = {[minI] = 12.3, [minI + 1] = 23.5}
+  a, b = unpack(t, minI, minI + 1); assert(a == 12.3 and b == 23.5)
+  a, b = unpack(t, minI, minI); assert(a == 12.3 and b == nil)
+  a, b = unpack(t, minI + 1, minI); assert(a == nil and b == nil)
+end
+
+do   -- length is not an integer
+  local t = setmetatable({}, {__len = function () return 'abc' end})
+  assert(#t == 'abc')
+  checkerror("object length is not an integer", table.insert, t, 1)
 end
 
 print "testing pack"
@@ -53,14 +86,57 @@ a = table.pack(nil, nil, nil, nil)
 assert(a[1] == nil and a.n == 4)
 
 
+-- testing move
+do
+  local function eqT (a, b)
+    for k, v in pairs(a) do assert(b[k] == v) end 
+    for k, v in pairs(b) do assert(a[k] == v) end 
+  end
+
+  local a = table.move({10,20,30}, 1, 3, 2)  -- move forward
+  eqT(a, {10,10,20,30})
+
+  a = table.move({10,20,30}, 2, 3, 1)   -- move backward
+  eqT(a, {20,30,30})
+
+  a = table.move({10,20,30}, 1, 3, 1, {})   -- move
+  eqT(a, {10,20,30})
+
+  a = table.move({10,20,30}, 1, 0, 3)   -- do not move
+  eqT(a, {10,20,30})
+
+  local max = math.maxinteger
+  a = table.move({[max - 2] = 1, [max - 1] = 2, [max] = 3},
+        max - 2, max, -10, {})
+  eqT(a, {[-10] = 1, [-9] = 2, [-8] = 3})
+
+  a = setmetatable({}, {
+        __index = function (_,k) return k * 10 end,
+        __newindex = error})
+  local b = table.move(a, 1, 10, 3, {})
+  eqT(a, {})
+  eqT(b, {nil,nil,10,20,30,40,50,60,70,80,90,100})
+
+  b = setmetatable({""}, {
+        __index = error,
+        __newindex = function (t,k,v)
+          t[1] = string.format("%s(%d,%d)", t[1], k, v)
+      end})
+  table.move(a, 10, 13, 3, b)
+  assert(b[1] == "(3,100)(4,110)(5,120)(6,130)")
+  local stat, msg = pcall(table.move, b, 10, 13, 3, b)
+  assert(not stat and msg == b)
+end
+
+checkerror("must be positive", table.move, {}, -1, 1, 1)
+
 print"testing sort"
 
 
 -- test checks for invalid order functions
 local function check (t)
   local function f(a, b) assert(a and b); return true end
-  local s, e = pcall(table.sort, t, f)
-  assert(not s and e:find("invalid order function"))
+  checkerror("invalid order function", table.sort, t, f)
 end
 
 check{1,2,3,4}

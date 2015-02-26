@@ -1,9 +1,3 @@
-/*
-** compile with
-** 	gcc -Wall -O2 -I.. -ansi -shared -o lib1.so lib1.c
-*/
-
-
 #include "lua.h"
 #include "lauxlib.h"
 
@@ -18,7 +12,7 @@ static const struct luaL_Reg funcs[] = {
 };
 
 
-int luaopen_lib2 (lua_State *L) {
+LUAMOD_API int luaopen_lib2 (lua_State *L) {
   lua_settop(L, 2);
   lua_setglobal(L, "y");  /* y gets 2nd parameter */
   lua_setglobal(L, "x");  /* x gets 1st parameter */

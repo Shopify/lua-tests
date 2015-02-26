@@ -1,3 +1,5 @@
+-- $Id: closure.lua,v 1.58 2014/12/26 17:20:53 roberto Exp $
+
 print "testing closures"
 
 local A,B = 0,{g=10}

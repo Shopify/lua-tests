@@ -1,6 +1,7 @@
 #!../lua
+-- $Id: all.lua,v 1.91 2014/12/26 17:20:53 roberto Exp $
 
-local version = "Lua 5.2"
+local version = "Lua 5.3"
 if _VERSION ~= version then
   io.stderr:write("\nThis test suite is for ", version, ", not for ", _VERSION,
     "\nExiting tests\n")
@@ -10,15 +11,13 @@ end
 
 -- next variables control the execution of some tests
 -- true means no test (so an undefined variable does not skip a test)
--- defaults are for Linux; test everything
-
-_soft = false      -- true to avoid long or memory consuming tests
-_port = false      -- true to avoid non-portable tests
-_no32 = false      -- true to avoid tests that assume 32 bits
-_nomsg = false     -- true to avoid messages about tests not performed
-_noposix = false   -- false assumes LUA_USE_POSIX
-_nolonglong = false  -- false assumes LUA_USE_LONGLONG
-_noformatA = false   -- false assumes LUA_USE_AFORMAT
+-- defaults are for Linux; test everything.
+-- Make true to avoid long or memory consuming tests
+_soft = rawget(_G, "_soft") or false
+-- Make true to avoid non-portable tests
+_port = rawget(_G, "_port") or false
+-- Make true to avoid messages about tests not performed
+_nomsg = rawget(_G, "_nomsg") or false
 
 
 local usertests = rawget(_G, "_U")
@@ -27,25 +26,19 @@ if usertests then
   -- tests for sissies ;)  Avoid problems
   _soft = true
   _port = true
-  _no32 = true
   _nomsg = true
-  _noposix = true
-  _nolonglong = true
-  _noformatA = true; 
 end
 
--- no "internal" tests for user tests
-if usertests then T = nil end
+-- tests should require debug when needed
+debug = nil
 
-T = rawget(_G, "T")  -- avoid problems with 'strict' module
-
-package.path = "?;./?.lua" .. package.path
+if usertests then
+  T = nil    -- no "internal" tests for user tests
+else
+  T = rawget(_G, "T")  -- avoid problems with 'strict' module
+end
 
 math.randomseed(0)
-
-collectgarbage("setstepmul", 200)
-collectgarbage("setpause", 200)
-
 
 --[=[
   example of a long [comment],
@@ -56,7 +49,9 @@ collectgarbage("setpause", 200)
 print("current path:\n****" .. package.path .. "****\n")
 
 
-local c = os.clock()
+local initclock = os.clock()
+local lastclock = initclock
+local walltime = os.time()
 
 local collectgarbage = collectgarbage
 
@@ -80,7 +75,7 @@ local T,print,format,write,assert,type,unpack,floor =
 local function F (m)
   local function round (m)
     m = m + 0.04999
-    return m - (m % 0.1)     -- keep one decimal digit
+    return format("%.1f", m)      -- keep one decimal digit
   end
   if m < 1000 then return m
   else
@@ -122,11 +117,14 @@ end
 --
 local function report (n) print("\n***** FILE '"..n.."'*****") end
 local olddofile = dofile
-dofile = function (n)
+local dofile = function (n, strip)
   showmem()
+  local c = os.clock()
+  print(string.format("time: %g (+%g)", c - initclock, c - lastclock))
+  lastclock = c
   report(n)
   local f = assert(loadfile(n))
-  local b = string.dump(f)
+  local b = string.dump(f, strip)
   f = assert(load(b))
   return f()
 end
@@ -135,41 +133,31 @@ dofile('main.lua')
 
 do
   local next, setmetatable, stderr = next, setmetatable, io.stderr
+  -- track collections
   local mt = {}
-  -- each time a table is collected, create a new one to be
-  -- collected next cycle
+  -- each time a table is collected, remark it for finalization
+  -- on next cycle
   mt.__gc = function (o)
-    stderr:write'.'    -- mark progress
-    local n = setmetatable({}, mt)   -- replicate object
-    o = nil
-    local a,b,c,d,e = nil    -- erase 'o' from the stack
-  end
-  local n = setmetatable({}, mt)   -- replicate object
+     stderr:write'.'    -- mark progress
+     local n = setmetatable(o, mt)   -- remark it
+   end
+   local n = setmetatable({}, mt)    -- create object
 end
 
 report"gc.lua"
 local f = assert(loadfile('gc.lua'))
 f()
 
-collectgarbage("generational")
 dofile('db.lua')
 assert(dofile('calls.lua') == deep and deep)
 olddofile('strings.lua')
 olddofile('literals.lua')
+dofile('tpack.lua')
 assert(dofile('attrib.lua') == 27)
 
-collectgarbage("incremental")   -- redo some tests in incremental mode
-olddofile('strings.lua')
-olddofile('literals.lua')
-dofile('constructs.lua')
-dofile('api.lua')
-
-collectgarbage("generational")   -- back to generational mode
-collectgarbage("setpause", 200)
-collectgarbage("setmajorinc", 500)
 assert(dofile('locals.lua') == 5)
 dofile('constructs.lua')
-dofile('code.lua')
+dofile('code.lua', true)
 if not _G._soft then
   report('big.lua')
   local f = coroutine.wrap(assert(loadfile('big.lua')))
@@ -178,17 +166,18 @@ if not _G._soft then
 end
 dofile('nextvar.lua')
 dofile('pm.lua')
+dofile('utf8.lua')
 dofile('api.lua')
 assert(dofile('events.lua') == 12)
 dofile('vararg.lua')
 dofile('closure.lua')
 dofile('coroutine.lua')
-dofile('goto.lua')
+dofile('goto.lua', true)
 dofile('errors.lua')
 dofile('math.lua')
-dofile('sort.lua')
+dofile('sort.lua', true)
 dofile('bitwise.lua')
-assert(dofile('verybig.lua') == 10); collectgarbage()
+assert(dofile('verybig.lua', true) == 10); collectgarbage()
 dofile('files.lua')
 
 if #msgs > 0 then
@@ -199,9 +188,13 @@ if #msgs > 0 then
   print()
 end
 
-print("final OK !!!")
+-- no test module should define 'debug'
+assert(debug == nil)
 
 local debug = require "debug"
+
+print(string.format("%d-bit integers, %d-bit floats",
+        string.packsize("j") * 8, string.packsize("n") * 8))
 
 debug.sethook(function (a) assert(type(a) == 'string') end, "cr")
 
@@ -210,8 +203,8 @@ _G.showmem = showmem
 
 end   --)
 
-local _G, showmem, print, format, clock, assert, open =
-      _G, showmem, print, string.format, os.clock, assert, io.open
+local _G, showmem, print, format, clock, time, assert, open =
+      _G, showmem, print, string.format, os.clock, os.time, assert, io.open
 
 -- file with time of last performed test
 local fname = T and "time-debug.txt" or "time.txt"
@@ -221,7 +214,7 @@ if not usertests then
   -- open file with time of last performed test
   local f = io.open(fname)
   if f then
-    lasttime = assert(tonumber(f:read'*a'))
+    lasttime = assert(tonumber(f:read'a'))
     f:close();
   else   -- no such file; assume it is recording time for first time
     lasttime = nil
@@ -244,16 +237,22 @@ collectgarbage()
 collectgarbage()
 collectgarbage();showmem()
 
-local time = clock() - c
+local clocktime = clock() - initclock
+walltime = time() - walltime
 
-print(format("\n\ntotal time: %.2f\n", time))
+print(format("\n\ntotal time: %.2fs (wall time: %ds)\n", clocktime, walltime))
 
 if not usertests then
-  lasttime = lasttime or time    -- if there is no last time, ignore difference
+  lasttime = lasttime or clocktime    -- if no last time, ignore difference
   -- check whether current test time differs more than 5% from last time
-  local diff = (time - lasttime) / time
+  local diff = (clocktime - lasttime) / clocktime
   local tolerance = 0.05    -- 5%
-  assert(diff < tolerance and diff > -tolerance)
-  assert(open(fname, "w")):write(time):close()
+  if (diff >= tolerance or diff <= -tolerance) then
+    print(format("WARNING: time difference from previous test: %+.1f%%",
+                  diff * 100))
+  end
+  assert(open(fname, "w")):write(clocktime):close()
 end
+
+print("final OK !!!")
 

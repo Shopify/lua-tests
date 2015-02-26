@@ -1,3 +1,5 @@
+-- $Id: calls.lua,v 1.56 2014/12/26 17:20:53 roberto Exp $
+
 print("testing functions and calls")
 
 local debug = require "debug"
@@ -6,13 +8,30 @@ local debug = require "debug"
 
 assert(type(1<2) == 'boolean')
 assert(type(true) == 'boolean' and type(false) == 'boolean')
-assert(type(nil) == 'nil' and type(-3) == 'number' and type'x' == 'string' and
-       type{} == 'table' and type(type) == 'function')
+assert(type(nil) == 'nil'
+   and type(-3) == 'number'
+   and type'x' == 'string'
+   and type{} == 'table'
+   and type(type) == 'function')
 
 assert(type(assert) == type(print))
-f = nil
 function f (x) return a:x (x) end
 assert(type(f) == 'function')
+
+
+do    -- test error in 'print' too...
+  local tostring = _ENV.tostring
+
+  _ENV.tostring = nil
+  local st, msg = pcall(print, 1)
+  assert(st == false and string.find(msg, "attempt to call a nil value"))
+
+  _ENV.tostring = function () return {} end
+  local st, msg = pcall(print, 1)
+  assert(st == false and string.find(msg, "must return a string"))
+  
+  _ENV.tostring = tostring
+end
 
 
 -- testing local-function recursion
@@ -289,7 +308,7 @@ x = load(string.dump(function (x)
   if x == "set" then a = 10+b; b = b+1 else
   return a
   end
-end))
+end), "", "b", nil)
 assert(x() == nil)
 assert(debug.setupvalue(x, 1, "hi") == "a")
 assert(x() == "hi")
@@ -300,11 +319,71 @@ assert(x() == 23)
 x("set")
 assert(x() == 24)
 
+-- test for dump/undump with many upvalues
+do
+  local nup = 200    -- maximum number of local variables
+  local prog = {"local a1"}
+  for i = 2, nup do prog[#prog + 1] = ", a" .. i end
+  prog[#prog + 1] = " = 1"
+  for i = 2, nup do prog[#prog + 1] = ", " .. i end
+  local sum = 1
+  prog[#prog + 1] = "; return function () return a1"
+  for i = 2, nup do prog[#prog + 1] = " + a" .. i; sum = sum + i end
+  prog[#prog + 1] = " end"
+  prog = table.concat(prog)
+  local f = assert(load(prog))()
+  assert(f() == sum)
+
+  f = load(string.dump(f))   -- main chunk now has many upvalues
+  local a = 10
+  local h = function () return a end
+  for i = 1, nup do
+    debug.upvaluejoin(f, i, h, 1)
+  end
+  assert(f() == 10 * nup)
+end
 
 -- test for bug in parameter adjustment
 assert((function () return nil end)(4) == nil)
 assert((function () local a; return a end)(4) == nil)
 assert((function (a) return a end)() == nil)
+
+
+print("testing binary chunks")
+do
+  local header = string.pack("c4BBc6BBBBBj",
+    "\27Lua",                -- signature
+    5*16 + 3,                -- version 5.3
+    0,                       -- format
+    "\x19\x93\r\n\x1a\n",    -- data
+    string.packsize("i"),    -- sizeof(int)
+    string.packsize("T"),    -- sizeof(size_t)
+    4,                       -- size of instruction
+    string.packsize("j"),    -- sizeof(lua integer)
+    string.packsize("n"),    -- sizeof(lua number)
+    0x5678                   -- LUAC_INT
+    -- LUAC_NUM may not have a unique binary representation (padding...)
+  )
+  local c = string.dump(function () local a = 1; local b = 3; return a+b*3 end)
+
+  assert(string.sub(c, 1, #header) == header)
+
+  -- corrupted header
+  for i = 1, #header do
+    local s = string.sub(c, 1, i - 1) ..
+              string.char(string.byte(string.sub(c, i, i)) + 1) ..
+              string.sub(c, i + 1, -1)
+    assert(#s == #c)
+    assert(not load(s))
+  end
+
+  -- loading truncated binary chunks
+  for i = 1, #c - 1 do
+    local st, msg = load(string.sub(c, 1, i))
+    assert(not st and string.find(msg, "truncated"))
+  end
+  assert(assert(load(c))() == 10)
+end
 
 print('OK')
 return deep
